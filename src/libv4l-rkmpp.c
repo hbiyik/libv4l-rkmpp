@@ -498,7 +498,7 @@ int rkmpp_querybuf(struct rkmpp_context *ctx, struct v4l2_buffer *buffer)
 	}
 
 	rkmpp_buffer = &queue->buffers[buffer->index];
-
+	buffer->length = queue->format.num_planes;
 	ret = rkmpp_to_v4l2_buffer(ctx, rkmpp_buffer, buffer);
 	if (ret < 0) {
 		LOGE("failed to convert buffer\n");
@@ -622,6 +622,7 @@ int rkmpp_dqbuf(struct rkmpp_context *ctx, struct v4l2_buffer *buffer)
 	/* Update poll event after avail list changed */
 	rkmpp_update_poll_event(ctx);
 
+	buffer->length = queue->format.num_planes;
 	ret = rkmpp_to_v4l2_buffer(ctx, rkmpp_buffer, buffer);
 	if (ret < 0) {
 		LOGE("failed to convert buffer\n");
