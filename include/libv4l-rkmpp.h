@@ -232,7 +232,9 @@ struct rkmpp_context {
 
 	bool is_decoder;
 	bool nonblock;
-	int eventfd;
+	int event_fd;
+	int eventin_fd;
+	int eventout_fd;
 
 	MppCtx mpp;
 	MppApi *mpi;

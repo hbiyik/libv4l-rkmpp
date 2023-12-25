@@ -647,7 +647,9 @@ int rkmpp_dqbuf(struct rkmpp_context *ctx, struct v4l2_buffer *buffer)
 int rkmpp_update_poll_event(struct rkmpp_context *ctx)
 {
 	eventfd_t event;
-	bool has_event;
+	bool has_event = 0;
+	bool has_eventin = 0;
+	bool has_eventout = 0;
 	int ret;
 
 	ENTER();
@@ -657,14 +659,26 @@ int rkmpp_update_poll_event(struct rkmpp_context *ctx)
 	else
 		has_event = rkmpp_enc_has_event(ctx->data);
 
-	has_event |= !TAILQ_EMPTY(&ctx->output.avail_buffers);
-	has_event |= !TAILQ_EMPTY(&ctx->capture.avail_buffers);
+	has_eventin = !TAILQ_EMPTY(&ctx->capture.avail_buffers);
+	has_eventout = !TAILQ_EMPTY(&ctx->output.avail_buffers);
+
+	/* Report POLLPRI event */
+	if (has_event)
+		ret = eventfd_write(ctx->event_fd, 1);
+	else
+		ret = eventfd_read(ctx->event_fd, &event);
 
 	/* Report POLLIN event */
-	if (has_event)
-		ret = eventfd_write(ctx->eventfd, 1);
+	if (has_eventin)
+		ret = eventfd_write(ctx->eventin_fd, 1);
 	else
-		ret = eventfd_read(ctx->eventfd, &event);
+		ret = eventfd_read(ctx->eventin_fd, &event);
+
+	/* Report POLLOUT event */
+	if (has_eventout)
+		ret = eventfd_write(ctx->eventout_fd, 1);
+	else
+		ret = eventfd_read(ctx->eventout_fd, &event);
 
 	LEAVE();
 	return ret;
@@ -774,24 +788,51 @@ static void *plugin_init(int fd)
 		goto err_free_ctx;
 	}
 
-	/* Create eventfd to fake poll events */
-	ctx->eventfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-	if (ctx->eventfd < 0) {
-		LOGE("failed to create eventfd\n");
-		goto err_free_ctx;
-	}
-
-	epollfd = epoll_create(1);
+	epollfd = epoll_create1(0);
 	if (epollfd < 0) {
 		LOGE("failed to create epollfd\n");
 		goto err_close_eventfd;
 	}
 
-	/* Filter out eventfd's POLLOUT, since it would be always generated */
+	/* Create eventfd to fake pollin events */
+	ctx->event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+	if (ctx->event_fd < 0) {
+		LOGE("failed to create eventfd\n");
+		goto err_free_ctx;
+	}
+
+	ev.events = EPOLLPRI | EPOLLET;
+	ev.data.fd = ctx->event_fd;
+	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, ctx->eventin_fd, &ev) < 0) {
+		LOGE("failed to add in eventfd\n");
+		goto err_close_epollfd;
+	}
+
+	/* Create eventfd to fake pollin events */
+	ctx->eventin_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+	if (ctx->eventin_fd < 0) {
+		LOGE("failed to create in eventfd\n");
+		goto err_free_ctx;
+	}
+
 	ev.events = EPOLLIN | EPOLLET;
-	ev.data.fd = ctx->eventfd;
-	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, ctx->eventfd, &ev) < 0) {
-		LOGE("failed to add eventfd\n");
+	ev.data.fd = ctx->eventin_fd;
+	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, ctx->eventin_fd, &ev) < 0) {
+		LOGE("failed to add in eventfd\n");
+		goto err_close_epollfd;
+	}
+
+	/* Create eventfd to fake pollout events */
+	ctx->eventout_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+	if (ctx->eventout_fd < 0) {
+		LOGE("failed to create out eventfd\n");
+		goto err_free_ctx;
+	}
+
+	ev.events = EPOLLOUT | EPOLLET;
+	ev.data.fd = ctx->eventout_fd;
+	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, ctx->eventout_fd, &ev) < 0) {
+		LOGE("failed to add out eventfd\n");
 		goto err_close_epollfd;
 	}
 
@@ -851,7 +892,9 @@ err_put_group:
 err_close_epollfd:
 	close(epollfd);
 err_close_eventfd:
-	close(ctx->eventfd);
+	close(ctx->event_fd);
+	close(ctx->eventin_fd);
+	close(ctx->eventout_fd);
 err_free_ctx:
 	free(ctx);
 	RETURN_ERR(errno, NULL);
@@ -889,7 +932,9 @@ static void plugin_close(void *dev_ops_priv)
 	if (ctx->codecs)
 		free(ctx->codecs);
 
-	close(ctx->eventfd);
+	close(ctx->event_fd);
+	close(ctx->eventin_fd);
+	close(ctx->eventout_fd);
 
 	LEAVE();
 
